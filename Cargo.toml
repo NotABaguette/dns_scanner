@@ -1,0 +1,21 @@
+[package]
+name    = "dns_scanner"
+version = "0.1.0"
+edition = "2021"
+description = "High-speed full-IPv4 DNS server scanner — designed to complete in under 1 hour on 1 Gbps"
+
+[[bin]]
+name = "dns_scanner"
+path = "src/main.rs"
+
+[dependencies]
+# Thin OS-level wrapper; used only for SO_RCVBUF / SO_SNDBUF tuning on Linux.
+# Zero runtime overhead on other platforms (calls are conditionally compiled out).
+libc = "0.2"
+
+[profile.release]
+opt-level      = 3
+lto            = "fat"       # whole-program link-time optimisation
+codegen-units  = 1           # single codegen unit for best optimisations
+panic          = "abort"     # smaller binary, no unwinding overhead
+strip          = true        # strip debug symbols
