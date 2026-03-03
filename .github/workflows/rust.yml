@@ -44,13 +44,13 @@ jobs:
           # ── macOS ──────────────────────────────────────────────────────────
 
           - name:           macos-intel
-            runner:         macos-12        # Intel — macos-13 is retired
+            runner:         macos-15-intel        # Intel — macos-13 is retired
             target:         x86_64-apple-darwin
             use_cross:      false
             artifact_name:  dns_scanner-macos-intel
 
           - name:           macos-arm64
-            runner:         macos-14        # Apple Silicon
+            runner:         macos-latest        # Apple Silicon
             target:         aarch64-apple-darwin
             use_cross:      false
             artifact_name:  dns_scanner-macos-arm64
