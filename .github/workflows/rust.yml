@@ -212,12 +212,10 @@ jobs:
 
       - name: Flatten artifact directories
         run: |
-          for dir in release-assets/*/; do
-            find "$dir" -type f | while read f; do
-              mv "$f" "release-assets/"
-            done
-            rmdir "$dir" 2>/dev/null || true
-          done
+          find release-assets -mindepth 2 -type f \
+            -exec mv -t release-assets/ {} +
+          find release-assets -mindepth 1 -maxdepth 1 -type d \
+            -exec rm -rf {} +
           ls -lh release-assets/
 
       - name: Copy dns_manager.py
