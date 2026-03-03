@@ -7,6 +7,17 @@ on:
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+    inputs:
+      create_release:
+        description: 'Create a GitHub Release?'
+        required: false
+        default: 'false'
+        type: boolean
+      release_tag:
+        description: 'Release tag name (e.g. v1.0.0) — only used when creating a release manually'
+        required: false
+        default: ''
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -44,13 +55,13 @@ jobs:
           # ── macOS ──────────────────────────────────────────────────────────
 
           - name:           macos-intel
-            runner:         macos-15-intel        # Intel — macos-13 is retired
+            runner:         macos-15-intel
             target:         x86_64-apple-darwin
             use_cross:      false
             artifact_name:  dns_scanner-macos-intel
 
           - name:           macos-arm64
-            runner:         macos-latest        # Apple Silicon
+            runner:         macos-latest
             target:         aarch64-apple-darwin
             use_cross:      false
             artifact_name:  dns_scanner-macos-arm64
@@ -88,7 +99,6 @@ jobs:
           targets: ${{ matrix.target }}
 
       # 3. Cargo cache ─────────────────────────────────────────────────────────
-      #    NOTE: Cargo.lock / target/ are at the repo ROOT (not in a subdirectory)
       - name: Cache Cargo
         uses: actions/cache@v4
         with:
@@ -114,7 +124,6 @@ jobs:
           tool: cross
 
       # 5. Build ───────────────────────────────────────────────────────────────
-      #    No working-directory needed — Cargo.toml is at the repo root
       - name: Build (cargo)
         if: matrix.use_cross == false
         run: cargo build --release --target ${{ matrix.target }}
@@ -171,11 +180,11 @@ jobs:
           retention-days: 30
 
   # ─────────────────────────────────────────────────────────────────────────────
-  #  Release — runs only on version tags (e.g. v1.0.0)
+  #  Release — runs on version tags OR manual dispatch with create_release=true
   # ─────────────────────────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.create_release == true
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -185,6 +194,16 @@ jobs:
 
       - name: Checkout
         uses: actions/checkout@v4
+
+      # Determine the tag/version name to use in the release title
+      - name: Resolve release name
+        id: tag
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "name=${{ inputs.release_tag || github.sha }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -213,13 +232,14 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          name: dns_scanner ${{ github.ref_name }}
+          name: dns_scanner ${{ steps.tag.outputs.name }}
+          tag_name: ${{ steps.tag.outputs.name }}
           draft: false
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          prerelease: ${{ contains(steps.tag.outputs.name, '-') }}
           generate_release_notes: true
           files: release-assets/*
           body: |
-            ## dns_scanner ${{ github.ref_name }}
+            ## dns_scanner ${{ steps.tag.outputs.name }}
 
             | Platform | Architecture   | File |
             |----------|---------------|------|
@@ -235,8 +255,8 @@ jobs:
 
             ### OS tuning before scanning (Linux)
             ```bash
-            sudo sysctl -w net.core.rmem_max=134217728
-            sudo sysctl -w net.core.wmem_max=134217728
-            sudo sysctl -w net.core.netdev_max_backlog=500000
-            ulimit -n 65535
+                        sudo sysctl -w net.core.rmem_max=134217728
+                        sudo sysctl -w net.core.wmem_max=134217728
+                        sudo sysctl -w net.core.netdev_max_backlog=500000
+                        ulimit -n 65535
             ```
