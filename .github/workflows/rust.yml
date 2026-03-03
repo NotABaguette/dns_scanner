@@ -1,0 +1,279 @@
+name: Build dns_scanner
+
+on:
+  push:
+    branches: [ main, master ]
+    tags:     [ 'v*' ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch/PR
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0        # cleaner CI caches
+  RUST_BACKTRACE: 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Matrix
+#
+#  target          │ runner          │ cross  │ notes
+#  ────────────────┼─────────────────┼────────┼──────────────────────────────
+#  x86_64-linux    │ ubuntu-latest   │ no     │ native
+#  aarch64-linux   │ ubuntu-latest   │ yes    │ cross via Docker (cross-rs)
+#  x86_64-macos    │ macos-13        │ no     │ native Intel runner
+#  aarch64-macos   │ macos-14        │ no     │ native Apple Silicon runner
+#  x86_64-windows  │ windows-latest  │ no     │ native
+#  i686-windows    │ windows-latest  │ no     │ 32-bit target, native host
+#  aarch64-windows │ windows-latest  │ no     │ cross-compile (MSVC host ok)
+# ─────────────────────────────────────────────────────────────────────────────
+
+jobs:
+  build:
+    name: Build · ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+
+          # ── Linux ────────────────────────────────────────────────────────
+
+          - name:    linux-amd64
+            runner:  ubuntu-latest
+            target:  x86_64-unknown-linux-musl   # static binary — no glibc dep
+            use_cross: false
+            artifact_name: dns_scanner-linux-amd64
+
+          - name:    linux-arm64
+            runner:  ubuntu-latest
+            target:  aarch64-unknown-linux-musl   # static, runs on any aarch64 Linux
+            use_cross: true
+            artifact_name: dns_scanner-linux-arm64
+
+          # ── macOS ────────────────────────────────────────────────────────
+
+          - name:    macos-intel
+            runner:  macos-13          # Intel GitHub runner
+            target:  x86_64-apple-darwin
+            use_cross: false
+            artifact_name: dns_scanner-macos-intel
+
+          - name:    macos-arm64
+            runner:  macos-14          # Apple Silicon GitHub runner
+            target:  aarch64-apple-darwin
+            use_cross: false
+            artifact_name: dns_scanner-macos-arm64
+
+          # ── Windows ──────────────────────────────────────────────────────
+
+          - name:    windows-x64
+            runner:  windows-latest
+            target:  x86_64-pc-windows-msvc
+            use_cross: false
+            artifact_name: dns_scanner-windows-x64
+            ext: .exe
+
+          - name:    windows-x86
+            runner:  windows-latest
+            target:  i686-pc-windows-msvc
+            use_cross: false
+            artifact_name: dns_scanner-windows-x86
+            ext: .exe
+
+          - name:    windows-arm64
+            runner:  windows-latest
+            target:  aarch64-pc-windows-msvc
+            use_cross: false
+            artifact_name: dns_scanner-windows-arm64
+            ext: .exe
+
+    steps:
+
+      # 1. Checkout ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Rust toolchain ────────────────────────────────────────────────────
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # 3. Cache Cargo registry + build artefacts ────────────────────────────
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            dns_scanner_rs/target/
+          key: cargo-${{ matrix.target }}-${{ hashFiles('dns_scanner_rs/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.target }}-
+
+      # 4a. Install musl tools for static Linux builds (native, no cross) ───
+      - name: Install musl tools (linux-amd64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get install -y musl-tools
+
+      # 4b. Install cross for cross-compiled targets ─────────────────────────
+      - name: Install cross
+        if: matrix.use_cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # 5. Build ─────────────────────────────────────────────────────────────
+      - name: Build (cargo)
+        if: matrix.use_cross == false
+        working-directory: dns_scanner_rs
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (cross)
+        if: matrix.use_cross == true
+        working-directory: dns_scanner_rs
+        run: cross build --release --target ${{ matrix.target }}
+
+      # 6. Locate binary and move to a predictable staging path ──────────────
+      - name: Stage binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p staging
+          cp dns_scanner_rs/target/${{ matrix.target }}/release/dns_scanner \
+             staging/${{ matrix.artifact_name }}
+          chmod +x staging/${{ matrix.artifact_name }}
+
+      - name: Stage binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging | Out-Null
+          Copy-Item `
+            "dns_scanner_rs\target\${{ matrix.target }}\release\dns_scanner.exe" `
+            "staging\${{ matrix.artifact_name }}.exe"
+
+      # 7. Strip debug symbols to shrink binary (skip Windows / cross ARM) ───
+      - name: Strip binary (Linux amd64)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: strip staging/${{ matrix.artifact_name }}
+
+      - name: Strip binary (macOS)
+        if: runner.os == 'macOS'
+        run: strip staging/${{ matrix.artifact_name }}
+
+      # 8. Quick smoke-test on native targets ────────────────────────────────
+      - name: Smoke test (Unix native)
+        if: |
+          runner.os != 'Windows' &&
+          matrix.use_cross == false
+        run: staging/${{ matrix.artifact_name }} --help
+
+      - name: Smoke test (Windows native)
+        if: |
+          runner.os == 'Windows' &&
+          matrix.target != 'aarch64-pc-windows-msvc'
+        shell: pwsh
+        run: staging\${{ matrix.artifact_name }}.exe --help
+
+      # 9. Upload per-platform artifact ──────────────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: staging/
+          retention-days: 30
+
+  # ───────────────────────────────────────────────────────────────────────────
+  #  Release job — runs only on version tags (v*)
+  #  Collects all platform artifacts and creates a GitHub Release.
+  # ───────────────────────────────────────────────────────────────────────────
+  release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # needed to create releases
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Download every artifact uploaded above
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets/
+
+      # Flatten directory structure: release-assets/<name>/<name>[.exe] → release-assets/<name>[.exe]
+      - name: Flatten artifact directories
+        run: |
+          for dir in release-assets/*/; do
+            find "$dir" -type f | while read f; do
+              mv "$f" "release-assets/"
+            done
+            rmdir "$dir" 2>/dev/null || true
+          done
+          ls -lh release-assets/
+
+      # Also bundle the Python manager script
+      - name: Copy dns_manager.py
+        run: cp dns_manager.py release-assets/dns_manager.py
+
+      # Create checksums
+      - name: Generate SHA-256 checksums
+        working-directory: release-assets
+        run: |
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: dns_scanner ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}  # e.g. v1.0.0-beta → pre-release
+          generate_release_notes: true
+          files: |
+            release-assets/*
+          body: |
+            ## dns_scanner ${{ github.ref_name }}
+
+            ### Downloads
+            | Platform        | Architecture | File |
+            |-----------------|-------------|------|
+            | Linux           | x86_64      | `dns_scanner-linux-amd64` |
+            | Linux           | ARM64       | `dns_scanner-linux-arm64` |
+            | macOS           | Intel       | `dns_scanner-macos-intel` |
+            | macOS           | Apple Silicon | `dns_scanner-macos-arm64` |
+            | Windows         | x64         | `dns_scanner-windows-x64.exe` |
+            | Windows         | x86 (32-bit)| `dns_scanner-windows-x86.exe` |
+            | Windows         | ARM64       | `dns_scanner-windows-arm64.exe` |
+
+            ### Also included
+            - `dns_manager.py` — DNSTT & SLIPSTREAM manager script
+            - `SHA256SUMS.txt` — checksums for all binaries
+
+            ### OS tuning for best scan throughput
+            ```bash
+            sudo sysctl -w net.core.rmem_max=134217728
+            sudo sysctl -w net.core.wmem_max=134217728
+            sudo sysctl -w net.core.netdev_max_backlog=500000
+            ulimit -n 65535
+            ```
+
+            ### Quick start
+            ```bash
+            chmod +x dns_scanner-linux-amd64
+            ./dns_scanner-linux-amd64 --output working_dns.txt
+            python dns_manager.py --dns-file working_dns.txt \
+              --dnstt-cmd "dnstt-client -udp {dns}:53 -pubkey KEY ..."
+            ```
